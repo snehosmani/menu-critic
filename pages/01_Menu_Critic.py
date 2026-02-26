@@ -489,6 +489,17 @@ for col, (title, desc) in zip(hero_cols, hero_cards):
 
 _render_sample_downloads()
 
+st.markdown(
+    """
+    <div class="mc-card" style="padding:0.65rem 0.9rem;">
+      <p style="margin:0; font-size:0.9rem; color:#667085;">
+        ⚡ Built in ~2 hrs using ChatGPT Codex + Gork ❤️
+      </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
     logger.warning("GROQ_API_KEY missing in Streamlit secrets.")
