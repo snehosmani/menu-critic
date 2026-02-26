@@ -207,6 +207,12 @@ def _init_state() -> None:
     st.session_state.setdefault("last_run_stats", None)
 
 
+def _clear_last_result_view() -> None:
+    st.session_state["last_result"] = None
+    st.session_state["last_result_json_text"] = ""
+    st.session_state["last_run_stats"] = None
+
+
 def _render_scorecard(scores: dict[str, int]) -> None:
     st.markdown('<div class="mc-section">Scorecard</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -548,6 +554,8 @@ elif retry_clicked and st.session_state.get("last_critique_request"):
 if request_to_run:
     try:
         logger.info("Analyze requested. request_type=%s input_mode=%s", request_to_run, input_mode)
+        if request_to_run == "new":
+            _clear_last_result_view()
         _enforce_rate_limit()
         client = get_groq_client(api_key)
 
@@ -614,9 +622,11 @@ if request_to_run:
         logger.info("Analysis succeeded and result saved to session.")
 
     except ValueError as exc:
+        _clear_last_result_view()
         logger.info("Validation/user input error during analyze: %s", exc)
         st.error(str(exc))
     except SuspiciousMenuInputError as exc:
+        _clear_last_result_view()
         logger.info("Suspicious/non-menu input detected: %s", exc)
         st.warning("Haha, very smart. That doesn't look like a real menu.")
         st.write(
@@ -626,6 +636,7 @@ if request_to_run:
         _show_gif("confused.gif", "The AI is not falling for it.")
         st.caption(str(exc))
     except VisionExtractionError as exc:
+        _clear_last_result_view()
         logger.warning("Vision extraction error shown to user: %s", exc)
         st.warning("Image parsing hiccup: I roasted myself before roasting your menu.")
         st.write(
@@ -635,6 +646,7 @@ if request_to_run:
         _show_gif("confused.gif", "Confused but trying.")
         st.caption(str(exc))
     except InvalidJSONResponse as exc:
+        _clear_last_result_view()
         logger.warning("Invalid JSON response from model. error=%s raw_len=%s", exc, len(exc.raw_output or ""))
         st.session_state["last_invalid_json_raw"] = exc.raw_output
         st.session_state["last_invalid_json_error"] = str(exc)
@@ -647,14 +659,17 @@ if request_to_run:
             st.session_state["queued_retry"] = True
             st.rerun()
     except RateLimitLikeError:
+        _clear_last_result_view()
         logger.warning("Groq rate limit-like error shown to user.")
         st.error("Groq is taking a nap - try again in a minute.")
         _show_gif("sad.gif", "API nap time.")
     except MenuCriticError as exc:
+        _clear_last_result_view()
         logger.exception("MenuCriticError during analyze flow.")
         st.error(f"Request failed: {exc}")
         _show_gif("sad.gif", "Something went sideways.")
     except Exception as exc:
+        _clear_last_result_view()
         logger.exception("Unexpected error during analyze flow.")
         st.error(f"Unexpected error: {exc}")
         _show_gif("sad.gif", "Unexpected plot twist.")
