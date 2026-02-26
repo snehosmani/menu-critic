@@ -1,0 +1,32 @@
+SUNSET BURGER CO.
+
+BURGERS
+Classic Burger ............ $11.99
+Cheese Burger ............. $12.49
+Bacon Burger .............. $13.99
+Double Burger ............. $15.99
+
+CHICKEN
+Crispy Chicken Sandwich ... $12.99
+Grilled Chicken Sandwich .. $12.99
+Chicken Tenders (4) ....... $10.99
+
+SIDES
+Fries (small) ............. $3.99
+Fries (large) ............. $5.99
+Onion Rings ............... $5.99
+Side Salad ................ $4.99
+
+DRINKS
+Soda ...................... $2.99
+Bottled Water ............. $2.49
+Milkshake ................. $6.99
+
+ADD ONS
+Cheese .................... $1.50
+Bacon ..................... $2.50
+Avocado ................... $2.99
+
+NOTES
+- Ask cashier for gluten free bun availability
+- Combo available with fries + soda

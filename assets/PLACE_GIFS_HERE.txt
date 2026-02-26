@@ -1,0 +1,5 @@
+Add these files to this folder for the UI fallback states:
+
+- sad.gif
+- confused.gif
+- this_is_fine.gif
