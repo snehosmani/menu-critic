@@ -2,6 +2,10 @@
 
 Menu Critic is a Streamlit multipage app that critiques restaurant menus to improve conversion, average order value (AOV), and customer experience.
 
+## Live Demo
+
+- Streamlit app: https://menu-critic-square-demo.streamlit.app/Menu_Critic
+
 It supports:
 
 - Pasted menu text (English)
@@ -55,6 +59,10 @@ GROQ_API_KEY = "your_groq_api_key_here"
 ```
 
 5. Deploy.
+
+### Hosted app (current)
+
+- https://menu-critic-square-demo.streamlit.app/Menu_Critic
 
 ## GIF Assets (Local Files)
 
