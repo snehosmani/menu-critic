@@ -16,6 +16,7 @@ from menu_critic_core import (
     InvalidJSONResponse,
     MenuCriticError,
     RateLimitLikeError,
+    SuspiciousMenuInputError,
     VisionExtractionError,
     analyze_menu_text,
     clamp_text_input,
@@ -23,6 +24,7 @@ from menu_critic_core import (
     extract_menu_text_from_image,
     get_groq_client,
     preprocess_image_for_groq,
+    validate_menu_like_text,
 )
 
 
@@ -202,6 +204,7 @@ def _init_state() -> None:
     st.session_state.setdefault("last_uploaded_image_bytes", None)
     st.session_state.setdefault("last_uploaded_image_name", None)
     st.session_state.setdefault("last_uploaded_image_mime", None)
+    st.session_state.setdefault("last_run_stats", None)
 
 
 def _render_scorecard(scores: dict[str, int]) -> None:
@@ -279,6 +282,53 @@ def _render_result(result: dict[str, Any], json_text: str) -> None:
     )
 
 
+def _fmt_stat(value: Any, suffix: str = "") -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.2f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def _render_run_stats(stats: dict[str, Any] | None) -> None:
+    st.markdown('<div class="mc-section">Run Stats</div>', unsafe_allow_html=True)
+    expanded = bool(stats)
+    with st.expander("Show / hide model + token stats", expanded=expanded):
+        if not stats:
+            st.caption("No run stats available yet.")
+            return
+
+        critique = stats.get("critique", {})
+        critique_usage = critique.get("usage", {}) or {}
+        vision = stats.get("vision", {})
+        vision_usage = (vision or {}).get("usage", {}) if vision else {}
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Tokens", _fmt_stat(critique_usage.get("total_tokens")))
+        c2.metric("Prompt Tokens", _fmt_stat(critique_usage.get("prompt_tokens")))
+        c3.metric("Completion Tokens", _fmt_stat(critique_usage.get("completion_tokens")))
+
+        with st.container(border=True):
+            st.caption("LLM / runtime metadata")
+            st.write(f"Critique model: `{critique.get('model', 'n/a')}`")
+            st.write(f"Response format: `{critique.get('response_format', 'n/a')}`")
+            st.write(f"Input source: `{stats.get('input_source', 'n/a')}`")
+            st.write(f"Input chars analyzed: `{stats.get('input_chars', 'n/a')}`")
+            st.write(f"Result JSON chars: `{critique.get('raw_output_chars', 'n/a')}`")
+            st.write(f"Total latency: `{_fmt_stat(stats.get('total_latency_ms'), ' ms')}`")
+            st.write(f"Critique latency: `{_fmt_stat(stats.get('critique_latency_ms'), ' ms')}`")
+            if vision:
+                st.write(f"Vision model: `{vision.get('model', 'n/a')}`")
+                st.write(f"Vision confidence: `{_fmt_stat(vision.get('confidence'))}`")
+                st.write(f"Vision latency: `{_fmt_stat(vision.get('latency_ms'), ' ms')}`")
+                st.write(
+                    "Vision tokens: "
+                    f"`p={_fmt_stat(vision_usage.get('prompt_tokens'))}, "
+                    f"c={_fmt_stat(vision_usage.get('completion_tokens'))}, "
+                    f"t={_fmt_stat(vision_usage.get('total_tokens'))}`"
+                )
+
+
 def _render_reference_panel(last_request: dict[str, Any]) -> None:
     st.markdown('<div class="mc-section">Reference</div>', unsafe_allow_html=True)
     source = last_request.get("source", "unknown")
@@ -314,6 +364,7 @@ def _build_critique_request(
         if not menu_text:
             logger.info("Analyze blocked: empty pasted text input.")
             raise ValueError("Please paste menu text before analyzing.")
+        validate_menu_like_text(menu_text, source="text")
         logger.info(
             "Preparing text-based critique request: mode=%s goal=%s chars=%s context_provided=%s",
             mode,
@@ -346,7 +397,9 @@ def _build_critique_request(
     )
 
     data_url, image_meta = preprocess_image_for_groq(uploaded_image)
+    vision_started = time.perf_counter()
     vision_result = extract_menu_text_from_image(client, data_url)
+    vision_latency_ms = int((time.perf_counter() - vision_started) * 1000)
     extracted_text = clamp_text_input(vision_result.menu_text)
 
     if (
@@ -368,6 +421,7 @@ def _build_critique_request(
         )
         raise VisionExtractionError(msg + " " + " | ".join(details), raw_output=vision_result.raw)
 
+    validate_menu_like_text(extracted_text, source="image")
     logger.info(
         "Image-based critique request ready: extracted_chars=%s confidence=%.2f meta=%s",
         len(extracted_text),
@@ -382,6 +436,9 @@ def _build_critique_request(
         "source": "image",
         "vision_confidence": vision_result.confidence,
         "vision_notes": vision_result.notes,
+        "vision_model": vision_result.model,
+        "vision_usage": vision_result.usage,
+        "vision_latency_ms": vision_latency_ms,
         "image_meta": image_meta,
     }
 
@@ -501,6 +558,7 @@ if request_to_run:
             spinner_message = "Retrying analysis..."
 
         with st.spinner(spinner_message):
+            total_started = time.perf_counter()
             if request_to_run == "new":
                 critique_request = _build_critique_request(
                     input_mode=input_mode,
@@ -519,23 +577,54 @@ if request_to_run:
                 critique_request = st.session_state["last_critique_request"]
                 logger.info("Retrying previous critique request. source=%s", critique_request.get("source"))
 
-            result, _raw_json = analyze_menu_text(
+            critique_started = time.perf_counter()
+            result, _raw_json, critique_meta = analyze_menu_text(
                 client=client,
                 menu_text=critique_request["menu_text"],
                 mode=critique_request["mode"],
                 goal=critique_request["goal"],
                 context=critique_request.get("context"),
             )
+            critique_latency_ms = int((time.perf_counter() - critique_started) * 1000)
+            total_latency_ms = int((time.perf_counter() - total_started) * 1000)
 
         st.session_state["last_result"] = result
         st.session_state["last_result_json_text"] = dumps_pretty_json(result)
         st.session_state["last_invalid_json_raw"] = ""
         st.session_state["last_invalid_json_error"] = ""
+        st.session_state["last_run_stats"] = {
+            "input_source": critique_request.get("source"),
+            "input_chars": len(critique_request.get("menu_text", "")),
+            "mode": critique_request.get("mode"),
+            "goal": critique_request.get("goal"),
+            "total_latency_ms": total_latency_ms,
+            "critique_latency_ms": critique_latency_ms,
+            "critique": critique_meta,
+            "vision": (
+                {
+                    "model": critique_request.get("vision_model"),
+                    "confidence": critique_request.get("vision_confidence"),
+                    "latency_ms": critique_request.get("vision_latency_ms"),
+                    "usage": critique_request.get("vision_usage"),
+                }
+                if critique_request.get("source") == "image"
+                else None
+            ),
+        }
         logger.info("Analysis succeeded and result saved to session.")
 
     except ValueError as exc:
         logger.info("Validation/user input error during analyze: %s", exc)
         st.error(str(exc))
+    except SuspiciousMenuInputError as exc:
+        logger.info("Suspicious/non-menu input detected: %s", exc)
+        st.warning("Haha, very smart. That doesn't look like a real menu.")
+        st.write(
+            "I can roast menus, but I can't pretend random keyboard jazz is a restaurant. "
+            "Paste real menu text or upload a clearer menu image."
+        )
+        _show_gif("confused.gif", "The AI is not falling for it.")
+        st.caption(str(exc))
     except VisionExtractionError as exc:
         logger.warning("Vision extraction error shown to user: %s", exc)
         st.warning("Image parsing hiccup: I roasted myself before roasting your menu.")
@@ -577,6 +666,7 @@ if last_result:
     with results_col:
         _render_result(last_result, st.session_state["last_result_json_text"])
     with ref_col:
+        _render_run_stats(st.session_state.get("last_run_stats"))
         _render_reference_panel(last_request)
 
 if st.session_state.get("last_invalid_json_raw") and not request_to_run:

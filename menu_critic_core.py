@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -113,6 +114,8 @@ class VisionExtractionResult:
     confidence: float
     notes: str = ""
     raw: str | None = None
+    usage: dict[str, int | None] | None = None
+    model: str | None = None
 
 
 class MenuCriticError(Exception):
@@ -139,6 +142,25 @@ class RateLimitLikeError(MenuCriticError):
     pass
 
 
+class SuspiciousMenuInputError(MenuCriticError):
+    pass
+
+
+def _usage_from_response(resp: Any) -> dict[str, int | None]:
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        }
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+
+
 def get_groq_client(api_key: str | None) -> Groq:
     if not api_key:
         logger.warning("Groq client setup failed: missing GROQ_API_KEY.")
@@ -153,6 +175,80 @@ def clamp_text_input(text: str) -> str:
         logger.info("Clamping menu text input from %s to %s characters.", len(cleaned), MAX_TEXT_CHARS)
         cleaned = cleaned[:MAX_TEXT_CHARS]
     return cleaned
+
+
+def validate_menu_like_text(text: str, source: str = "text") -> None:
+    candidate = (text or "").strip()
+    lowered = candidate.lower()
+
+    if len(candidate) < 20:
+        raise SuspiciousMenuInputError(
+            f"That {source} input is too short to look like a real menu. Nice try though."
+        )
+
+    tokens = re.findall(r"[A-Za-z]{2,}", candidate)
+    if not tokens:
+        raise SuspiciousMenuInputError(
+            f"That {source} input does not contain readable menu text."
+        )
+
+    alpha_chars = [c for c in candidate if c.isalpha()]
+    vowels = sum(1 for c in alpha_chars if c.lower() in "aeiou")
+    vowel_ratio = (vowels / len(alpha_chars)) if alpha_chars else 0.0
+    long_token_ratio = (
+        sum(1 for t in tokens if len(t) >= 9) / len(tokens)
+        if tokens
+        else 1.0
+    )
+    has_price = bool(re.search(r"[$€£]\s?\d|\b\d{1,3}\.\d{2}\b", candidate))
+    has_line_breaks = candidate.count("\n") >= 2
+    has_menu_words = any(
+        word in lowered
+        for word in [
+            "menu",
+            "burger",
+            "pizza",
+            "salad",
+            "drink",
+            "appetizer",
+            "dessert",
+            "chicken",
+            "fries",
+            "soup",
+            "sandwich",
+            "pasta",
+            "rice",
+            "combo",
+            "add on",
+            "addons",
+        ]
+    )
+
+    # Catch obvious keyboard-smash / gibberish inputs like "dfdsfsdg".
+    if not has_price and not has_line_breaks and not has_menu_words:
+        if len(tokens) <= 3 and (vowel_ratio < 0.22 or long_token_ratio > 0.6):
+            logger.info(
+                "Rejected suspicious %s input as non-menu text. chars=%s tokens=%s vowel_ratio=%.2f",
+                source,
+                len(candidate),
+                len(tokens),
+                vowel_ratio,
+            )
+            raise SuspiciousMenuInputError(
+                f"That {source} input does not look like a menu. It looks more like a keyboard warm-up."
+            )
+
+    # For longer text, require at least one menu-ish signal.
+    if len(candidate) < 120 and not (has_price or has_line_breaks or has_menu_words):
+        logger.info(
+            "Rejected suspicious %s input due to missing menu signals. chars=%s tokens=%s",
+            source,
+            len(candidate),
+            len(tokens),
+        )
+        raise SuspiciousMenuInputError(
+            f"That {source} input doesn't look menu-ish yet. Paste actual menu items or upload a clearer menu image."
+        )
 
 
 def _to_rgb(image: Image.Image) -> Image.Image:
@@ -285,7 +381,14 @@ def extract_menu_text_from_image(client: Groq, image_data_url: str) -> VisionExt
         len(menu_text),
     )
 
-    return VisionExtractionResult(menu_text=menu_text, confidence=confidence, notes=notes, raw=raw)
+    return VisionExtractionResult(
+        menu_text=menu_text,
+        confidence=confidence,
+        notes=notes,
+        raw=raw,
+        usage=_usage_from_response(resp),
+        model=VISION_MODEL,
+    )
 
 
 def _critique_system_prompt() -> str:
@@ -409,7 +512,7 @@ def analyze_menu_text(
     mode: str,
     goal: str,
     context: str | None = None,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
     logger.info(
         "Starting menu analysis: mode=%s goal=%s context_provided=%s text_chars=%s model=%s",
         mode,
@@ -431,6 +534,8 @@ def analyze_menu_text(
     )
 
     raw_output = ""
+    response_format_used = "json_schema"
+    usage_summary: dict[str, int | None] | None = None
     try:
         logger.debug("Requesting Groq structured output with json_schema.")
         resp = client.chat.completions.create(
@@ -445,17 +550,20 @@ def analyze_menu_text(
             },
         )
         raw_output = _chat_content_text(resp)
+        usage_summary = _usage_from_response(resp)
     except Exception as exc:
         if _is_rate_limit_error(exc):
             logger.warning("Text analysis hit rate limit-like error: %s", exc)
             raise RateLimitLikeError(str(exc)) from exc
         logger.warning("json_schema response format failed (%s). Falling back to json_object.", exc)
         try:
+            response_format_used = "json_object"
             resp = client.chat.completions.create(
                 **create_kwargs,
                 response_format={"type": "json_object"},
             )
             raw_output = _chat_content_text(resp)
+            usage_summary = _usage_from_response(resp)
         except Exception as inner_exc:
             if _is_rate_limit_error(inner_exc):
                 logger.warning("Fallback text analysis hit rate limit-like error: %s", inner_exc)
@@ -481,7 +589,13 @@ def analyze_menu_text(
         len(validated.get("rewrite_examples", [])),
         len(validated.get("ab_tests", [])),
     )
-    return validated, raw_output
+    meta = {
+        "model": TEXT_MODEL,
+        "response_format": response_format_used,
+        "usage": usage_summary or {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
+        "raw_output_chars": len(raw_output),
+    }
+    return validated, raw_output, meta
 
 
 def dumps_pretty_json(data: Any) -> str:
